@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>SilentVault — Non-custodial TON Wallet</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonconnect/ui@2.4.4/dist/tonconnect-ui.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #0f1420);
+    color: var(--tg-theme-text-color, #f2f4f8);
+    padding: 16px 16px 32px;
+  }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .sub { color: var(--tg-theme-hint-color, #9aa3b2); font-size: 13px; margin-bottom: 16px; }
+  .card {
+    background: var(--tg-theme-secondary-bg-color, #1b2336);
+    border-radius: 16px; padding: 16px; margin-bottom: 12px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 8px; }
+  .addr { word-break: break-all; font-size: 13px; color: var(--tg-theme-hint-color, #9aa3b2); }
+  .bal { font-size: 26px; font-weight: 700; }
+  .bal small { font-size: 13px; color: var(--tg-theme-hint-color, #9aa3b2); font-weight: 400; }
+  label { display: block; font-size: 13px; margin: 10px 0 4px; color: var(--tg-theme-hint-color, #9aa3b2); }
+  input, select {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #2c3852;
+    background: #0f1420; color: #f2f4f8; font-size: 15px;
+  }
+  button {
+    width: 100%; padding: 13px; border: 0; border-radius: 12px; margin-top: 12px;
+    background: var(--tg-theme-button-color, #2ea5ff); color: var(--tg-theme-button-text-color, #fff);
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: #2c3852; }
+  button:disabled { opacity: .5; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+  .tx { border-top: 1px solid #2c3852; padding: 10px 0; font-size: 14px; }
+  .tx:last-child { border-bottom: 1px solid #2c3852; }
+  .tx small { color: var(--tg-theme-hint-color, #9aa3b2); }
+  .ok { color: #4ade80; } .err { color: #f87171; }
+  .note { font-size: 12px; color: var(--tg-theme-hint-color, #9aa3b2); line-height: 1.5; }
+  #qr { display: block; margin: 12px auto; border-radius: 12px; background: #fff; padding: 8px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>💎 SilentVault</h1>
+<p class="sub" id="who">Non-custodial TON wallet — your keys never leave your wallet app.</p>
+
+<div class="card">
+  <h2>Connect wallet</h2>
+  <div id="ton-connect"></div>
+  <p class="note">Connect Tonkeeper, MyTonWallet, or Telegram's built-in wallet. This app
+  <b>never asks for your seed phrase</b> — transactions are signed by you, in your own wallet.</p>
+  <div id="wallet-info" class="hidden">
+    <p class="addr" id="wallet-addr"></p>
+    <div class="row">
+      <button class="secondary" id="btn-disconnect">Disconnect</button>
+      <button class="secondary" id="btn-refresh">Refresh</button>
+    </div>
+  </div>
+</div>
+
+<div id="main" class="hidden">
+  <div class="card">
+    <h2>Balances</h2>
+    <p class="bal"><span id="bal-ton">—</span> <small>TON (Gram)</small></p>
+    <p class="bal"><span id="bal-usdt">—</span> <small>USDT</small></p>
+    <p class="note" id="bal-note"></p>
+  </div>
+
+  <div class="card">
+    <h2>Send</h2>
+    <label for="send-asset">Asset</label>
+    <select id="send-asset"><option value="TON">TON (Gram)</option><option value="USDT">USDT</option></select>
+    <label for="send-to">Recipient TON address</label>
+    <input id="send-to" placeholder="EQ… / UQ…">
+    <label for="send-amount">Amount</label>
+    <input id="send-amount" inputmode="decimal" placeholder="0.00">
+    <button id="btn-send">Send</button>
+    <p class="note" id="send-status"></p>
+  </div>
+
+  <div class="card">
+    <h2>Receive</h2>
+    <p class="addr" id="recv-addr"></p>
+    <img id="qr" width="180" height="180" alt="Receive QR code">
+    <p class="note">Share this address or QR code. Only send TON and TON USDT (Jettons) to it.</p>
+  </div>
+
+  <div class="card">
+    <h2>Recent activity</h2>
+    <div id="history"><p class="note">Loading…</p></div>
+  </div>
+</div>
+
+<p class="note">Security: no server in v1 holds your funds or keys. Balances and history are
+read from public TON indexers; sending is a transaction you approve in your wallet.
+Always double-check the recipient address before confirming.</p>
+
+<script>
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+  var manifestUrl = new URL('tonconnect-manifest.json', window.location.href).href;
+  var tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
+    manifestUrl: manifestUrl,
+    buttonRootId: 'ton-connect'
+  });
+
+  var state = { address: null, usdtWallet: null, usdtDecimals: 6 };
+
+  function $(id) { return document.getElementById(id); }
+  function fmt(n, d) { return (Number(n) / Math.pow(10, d)).toLocaleString(undefined, { maximumFractionDigits: 6 }); }
+  function short(a) { return a ? a.slice(0, 6) + '…' + a.slice(-4) : ''; }
+
+  function showWallet(address) {
+    state.address = address;
+    $('wallet-info').classList.remove('hidden');
+    $('main').classList.remove('hidden');
+    $('wallet-addr').textContent = 'Connected: ' + address;
+    $('recv-addr').textContent = address;
+    $('qr').src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(address);
+    refresh();
+  }
+
+  function hideWallet() {
+    state.address = null; state.usdtWallet = null;
+    $('wallet-info').classList.add('hidden');
+    $('main').classList.add('hidden');
+  }
+
+  async function refresh() {
+    if (!state.address) return;
+    $('bal-note').textContent = 'Updating…';
+    try {
+      var r = await fetch('https://toncenter.com/api/v2/getAddressBalance?address=' + encodeURIComponent(state.address));
+      var j = await r.json();
+      $('bal-ton').textContent = j.ok ? fmt(j.result, 9) : '—';
+    } catch (e) { $('bal-ton').textContent = '—'; }
+    try {
+      var r2 = await fetch('https://tonapi.io/v2/accounts/' + encodeURIComponent(state.address) + '/jettons');
+      var j2 = await r2.json();
+      var usdt = (j2.balances || []).find(function (b) { return b.jetton && b.jetton.symbol === 'USDT'; });
+      if (usdt) {
+        state.usdtWallet = usdt.wallet_address && usdt.wallet_address.address;
+        state.usdtDecimals = (usdt.jetton && usdt.jetton.decimals) || 6;
+        $('bal-usdt').textContent = fmt(usdt.balance, state.usdtDecimals);
+      } else { $('bal-usdt').textContent = '0'; state.usdtWallet = null; }
+    } catch (e) { $('bal-usdt').textContent = '—'; }
+    try {
+      var r3 = await fetch('https://tonapi.io/v2/accounts/' + encodeURIComponent(state.address) + '/events?limit=10');
+      var j3 = await r3.json();
+      var evs = j3.events || [];
+      $('history').innerHTML = evs.length ? evs.map(function (ev) {
+        var a = ev.actions && ev.actions[0] ? ev.actions[0] : {};
+        var t = a.type || ev.type || 'Transaction';
+        var when = ev.timestamp ? new Date(ev.timestamp * 1000).toLocaleString() : '';
+        return '<div class="tx">' + t + '<br><small>' + when + '</small></div>';
+      }).join('') : '<p class="note">No recent activity.</p>';
+    } catch (e) { $('history').innerHTML = '<p class="note">History unavailable right now.</p>'; }
+    $('bal-note').textContent = '';
+  }
+
+  tonConnectUI.onStatusChange(function (wallet) {
+    if (wallet && wallet.account && wallet.account.address) showWallet(wallet.account.address);
+    else hideWallet();
+  });
+
+  $('btn-disconnect').onclick = function () { tonConnectUI.disconnect(); };
+  $('btn-refresh').onclick = refresh;
+
+  $('btn-send').onclick = async function () {
+    var asset = $('send-asset').value;
+    var to = $('send-to').value.trim();
+    var amt = parseFloat($('send-amount').value);
+    var st = $('send-status');
+    st.className = 'note'; st.textContent = '';
+    if (!state.address) { st.textContent = 'Connect your wallet first.'; return; }
+    if (!to || !(amt > 0)) { st.textContent = 'Enter a recipient address and an amount.'; return; }
+    try {
+      var msg;
+      if (asset === 'TON') {
+        var nano = BigInt(Math.round(amt * 1e9)).toString();
+        msg = { address: to, amount: nano };
+      } else {
+        if (!state.usdtWallet) { st.textContent = 'No USDT balance found for this wallet.'; return; }
+        var core = await import('https://esm.sh/@ton/core');
+        var body = core.beginCell()
+          .storeUint(0x0f8a7ea5, 32)
+          .storeUint(0, 64)
+          .storeCoins(BigInt(Math.round(amt * Math.pow(10, state.usdtDecimals))))
+          .storeAddress(core.Address.parse(to))
+          .storeAddress(core.Address.parse(state.address))
+          .storeBit(0)
+          .storeCoins(0)
+          .storeBit(0)
+          .endCell();
+        msg = { address: state.usdtWallet, amount: '50000000',
+                payload: body.toBoc().toString('base64') };
+      }
+      st.textContent = 'Approve the transaction in your wallet…';
+      var res = await tonConnectUI.sendTransaction({
+        validUntil: Math.floor(Date.now() / 1000) + 600,
+        messages: [msg]
+      });
+      st.className = 'note ok';
+      st.textContent = 'Sent! Your wallet approved the transaction. It appears in history once confirmed on-chain.';
+      $('send-to').value = ''; $('send-amount').value = '';
+      setTimeout(refresh, 5000);
+    } catch (e) {
+      st.className = 'note err';
+      st.textContent = 'Not sent: ' + (e && e.message ? e.message : 'transaction was rejected or failed.');
+    }
+  };
+
+  // Show the Telegram user (display only — v1 has no server, so nothing here is trusted server-side).
+  try {
+    var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+    if (u) $('who').textContent = 'Signed in as @' + (u.username || u.first_name) + ' — your keys never leave your wallet app.';
+  } catch (e) {}
+</script>
+</body>
+</html>
